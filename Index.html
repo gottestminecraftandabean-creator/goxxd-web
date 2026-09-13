@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Goxxd</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#111;color:#eee;font-family:Arial}
+header{padding:15px;font-size:22px;font-weight:bold}
+main{padding:10px}
+textarea,pre{
+ width:100%;background:#181818;color:#eee;
+ border:1px solid #444;border-radius:8px;
+ padding:12px;font-family:monospace
+}
+textarea{height:55vh;resize:vertical}
+pre{min-height:100px;white-space:pre-wrap}
+button{
+ margin:8px 4px 8px 0;padding:9px 16px;
+ border:0;border-radius:7px;font-weight:bold
+}
+</style>
+</head>
+
+<body>
+<header>Goxxd Web Engine</header>
+
+<main>
+<textarea id="code">function add(a, b):
+    return a + b
+
+result := add(10, 20)
+
+print(result)</textarea>
+
+<div>
+<button onclick="run()">RUN</button>
+<button onclick="clearCode()">CLEAR</button>
+<button onclick="help()">HELP</button>
+</div>
+
+<pre id="out"></pre>
+</main>
+
+<script>
+const $=x=>document.getElementById(x);
+const RET="return",BRK="break",CON="continue";
+
+class GoxxdError extends Error{
+ constructor(x){super("Goxxd Error: "+x)}
+}
+
+class Goxxd{
+ constructor(){
+  this.v={};
+  this.f={};
+  this.o=[];
+ }
+
+ clean(x){
+  return x.replace(/#.*$/,"").trim();
+ }
+
+ print(...x){
+  this.o.push(x.map(v=>this.text(v)).join(" "));
+ }
+
+ text(x){
+  if(x===null||x===undefined)return"null";
+  if(x===true)return"true";
+  if(x===false)return"false";
+  return String(x);
+ }
+
+ args(s){
+  let a=[],x="",d=0,q="";
+  for(let c of s){
+   if(q){
+    x+=c;
+    if(c===q)q="";
+   }else if(c==="\""||c==="'"){
+    q=c;x+=c;
+   }else if(c==="("){
+    d++;x+=c;
+   }else if(c===")"){
+    d--;x+=c;
+   }else if(c===","&&d===0){
+    a.push(x.trim());x="";
+   }else x+=c;
+  }
+  if(x.trim())a.push(x.trim());
+  return a;
+ }
+
+ callMatch(s){
+  let m=s.match(/^([A-Za-z_]\w*)\((.*)\)$/s);
+  return m;
+ }
+
+ call(name,argText){
+  if(name==="print"){
+   this.print(...this.args(argText).map(x=>this.eval(x)));
+   return null;
+  }
+
+  if(!this.f[name])
+   throw new GoxxdError("Unknown function: "+name);
+
+  let fn=this.f[name];
+  let av=this.args(argText).map(x=>this.eval(x));
+
+  if(av.length!==fn.p.length)
+   throw new GoxxdError(
+    name+" expects "+fn.p.length+" argument(s)"
+   );
+
+  let old=this.v;
+  this.v={...old};
+
+  fn.p.forEach((p,i)=>this.v[p]=av[i]);
+
+  let r=this.exec(fn.b,true);
+
+  this.v=old;
+
+  return r&&r.type===RET?r.value:null;
+ }
+
+ eval(s){
+  s=s.trim();
+
+  /* basic values */
+  if(s==="true")return true;
+  if(s==="false")return false;
+  if(s==="null")return null;
+
+  if(/^["'].*["']$/.test(s))
+   return s.slice(1,-1);
+
+  if(/^-?\d+(\.\d+)?$/.test(s))
+   return Number(s);
+
+  /* variable */
+  if(Object.prototype.hasOwnProperty.call(this.v,s))
+   return this.v[s];
+
+  /* function call */
+  let cm=this.callMatch(s);
+  if(cm)return this.call(cm[1],cm[2]);
+
+  /* parentheses */
+  if(this.isWrapped(s))
+   return this.eval(s.slice(1,-1));
+
+  /* logical */
+  let p=this.top(s," or ");
+  if(p>=0)
+   return !!this.eval(s.slice(0,p))||
+          !!this.eval(s.slice(p+4));
+
+  p=this.top(s," and ");
+  if(p>=0)
+   return !!this.eval(s.slice(0,p))&&
+          !!this.eval(s.slice(p+5));
+
+  if(s.startsWith("not "))
+   return !this.eval(s.slice(4));
+
+  /* comparison */
+  for(let op of ["==","!="," >=", "<="," >", "<"]){
+   op=op.trim();
+   p=this.top(s,op);
+   if(p>=0){
+    let a=this.eval(s.slice(0,p));
+    let b=this.eval(s.slice(p+op.length));
+
+    if(op==="==")return a==b;
+    if(op==="!=")return a!=b;
+    if(op===">")return a>b;
+    if(op==="<")return a<b;
+    if(op===">=")return a>=b;
+    if(op==="<=")return a<=b;
+   }
+  }
+
+  /* arithmetic */
+  p=this.operator(s,["+", "-"]);
+  if(p){
+   let a=this.eval(p.a),b=this.eval(p.b);
+   return p.op==="+"?a+b:a-b;
+  }
+
+  p=this.operator(s,["*","/","%"]);
+  if(p){
+   let a=this.eval(p.a),b=this.eval(p.b);
+   if(p.op==="*")return a*b;
+   if(p.op==="/")return a/b;
+   return a%b;
+  }
+
+  throw new GoxxdError("Cannot evaluate expression: "+s);
+ }
+
+ isWrapped(s){
+  if(!s.startsWith("(")||!s.endsWith(")"))return false;
+  let d=0,q="";
+  for(let i=0;i<s.length;i++){
+   let c=s[i];
+
+   if(q){
+    if(c===q)q="";
+    continue;
+   }
+
+   if(c==="\""||c==="'"){q=c;continue}
+   if(c==="(")d++;
+   if(c===")")d--;
+
+   if(d===0&&i<s.length-1)return false;
+  }
+  return d===0;
+ }
+
+ top(s,needle){
+  let d=0,q="";
+  for(let i=0;i<=s.length-needle.length;i++){
+   let c=s[i];
+
+   if(q){
+    if(c===q)q="";
+    continue;
+   }
+
+   if(c==="\""||c==="'"){q=c;continue}
+   if(c==="(")d++;
+   if(c===")")d--;
+
+   if(d===0&&s.slice(i,i+needle.length)===needle)
+    return i;
+  }
+  return -1;
+ }
+
+ operator(s,ops){
+  let d=0,q="";
+
+  for(let i=s.length-1;i>=0;i--){
+   let c=s[i];
+
+   if(q){
+    if(c===q)q="";
+    continue;
+   }
+
+   if(c==="\""||c==="'"){q=c;continue}
+   if(c===")")d++;
+   if(c==="(")d--;
+
+   if(d===0&&ops.includes(c)&&i>0){
+    return{
+     a:s.slice(0,i).trim(),
+     b:s.slice(i+1).trim(),
+     op:c
+    };
+   }
+  }
+  return null;
+ }
+
+ exec(lines,allowReturn=false){
+  for(let i=0;i<lines.length;i++){
+   let s=this.clean(lines[i]);
+   if(!s)continue;
+
+   if(s===BRK)return{type:BRK};
+   if(s===CON)return{type:CON};
+
+   if(s==="return"){
+    if(!allowReturn)
+     throw new GoxxdError("return outside function");
+    return{type:RET,value:null};
+   }
+
+   if(s.startsWith("return ")){
+    if(!allowReturn)
+     throw new GoxxdError("return outside function");
+    return{
+     type:RET,
+     value:this.eval(s.slice(7))
+    };
+   }
+
+   /* if */
+   if(/^if .+:$/.test(s)){
+    let z=this.getIf(lines,i);
+
+    for(let b of z.b){
+     if(b.type==="else"||this.eval(b.c)){
+      let r=this.exec(b.body,allowReturn);
+      if(r)return r;
+      break;
+     }
+    }
+
+    i=z.end;
+    continue;
+   }
+
+   /* loop */
+   let lm=s.match(/^loop\s+(.+):$/);
+   if(lm){
+    let n=this.eval(lm[1]);
+    let z=this.getBlock(lines,i);
+
+    for(let k=0;k<n;k++){
+     let r=this.exec(z.body,allowReturn);
+     if(r?.type===RET)return r;
+     if(r?.type===BRK)break;
+    }
+
+    i=z.end;
+    continue;
+   }
+
+   /* variable := */
+   let m=s.match(/^([A-Za-z_]\w*)\s*:=\s*(.+)$/);
+   if(m){
+    this.v[m[1]]=this.eval(m[2]);
+    continue;
+   }
+
+   /* variable = */
+   m=s.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
+   if(m){
+    if(!(m[1] in this.v))
+     throw new GoxxdError("Unknown variable: "+m[1]);
+
+    this.v[m[1]]=this.eval(m[2]);
+    continue;
+   }
+
+   /* standalone call */
+   if(this.callMatch(s)){
+    this.eval(s);
+    continue;
+   }
+
+   this.eval(s);
+  }
+ }
+
+ getBlock(lines,start){
+  let base=lines[start].match(/^\s*/)[0].length;
+  let body=[],i=start+1;
+
+  for(;i<lines.length;i++){
+   let r=lines[i];
+   if(!r.trim())continue;
+
+   let ind=r.match(/^\s*/)[0].length;
+   if(ind<=base)break;
+
+   body.push(r.slice(Math.min(r.length,base+4)));
+  }
+
+  return{body,end:i-1};
+ }
+
+ getIf(lines,start){
+  let base=lines[start].match(/^\s*/)[0].length;
+  let b=[],i=start;
+
+  while(i<lines.length){
+   let s=this.clean(lines[i]);
+
+   if(i!==start&&!/^(elif .+:|else:)$/.test(s))
+    break;
+
+   let type=s==="else:"?"else":i===start?"if":"elif";
+   let c=type==="else"?null:
+         s.slice(type==="if"?3:5,-1);
+
+   let z=this.getBlock(lines,i);
+
+   b.push({type,c,body:z.body});
+   i=z.end+1;
+
+   while(i<lines.length&&!lines[i].trim())i++;
+
+   if(i>=lines.length)break;
+
+   let next=this.clean(lines[i]);
+   if(!/^elif .+:$/.test(next)&&next!=="else:")break;
+  }
+
+  return{b,end:i-1};
+ }
+
+ collect(lines){
+  let out=[];
+
+  for(let i=0;i<lines.length;i++){
+   let s=this.clean(lines[i]);
+   let m=s.match(
+    /^function\s+([A-Za-z_]\w*)\((.*?)\):$/
+   );
+
+   if(!m){
+    out.push(lines[i]);
+    continue;
+   }
+
+   let z=this.getBlock(lines,i);
+
+   this.f[m[1]]={
+    p:m[2].trim()?this.args(m[2]):[],
+    b:z.body
+   };
+
+   i=z.end;
+  }
+
+  return out;
+ }
+
+ run(src){
+  this.v={};
+  this.f={};
+  this.o=[];
+
+  let lines=src.replace(/\r/g,"").split("\n");
+  lines=this.collect(lines);
+  this.exec(lines);
+
+  return this.o.join("\n");
+ }
+}
+
+function run(){
+ try{
+  let g=new Goxxd();
+  $("out").textContent=g.run($("code").value)||"(no output)";
+ }catch(e){
+  $("out").textContent=e.message;
+ }
+}
+
+function clearCode(){
+ $("code").value="";
+ $("out").textContent="";
+}
+
+function help(){
+ $("out").textContent=`Goxxd
+
+print("Hello")
+x := 100
+x = 200
+
+10 + 20
+x + 50
+
+x == 10
+x > 10
+x < 10
+x >= 10
+x <= 10
+
+x > 10 and x < 100
+x == 10 or x == 20
+not true
+
+if x > 50:
+    print("GOOD")
+elif x == 50:
+    print("OK")
+else:
+    print("BAD")
+
+loop 3:
+    print("Hello")
+
+break
+continue
+
+function add(a, b):
+    return a + b
+
+result := add(10, 20)
+print(result)`;
+}
+
+$("code").addEventListener("keydown",e=>{
+ if(e.ctrlKey&&e.key==="Enter")run();
+});
+</script>
+</body>
+  </html>
